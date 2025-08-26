@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+env/
+venv/
+ENV/
+
+# Notebooks
+.ipynb_checkpoints
+notebooks/
+
+# Data
+data/
+
+# Configs
+configs/
+
+# Deployment
+deployment/
+
+# Streamlit app
+streamlit_app/
+
+# Misc
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Dockerfile
+LICENSE
+README.md
+requirements.txt
