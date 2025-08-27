@@ -76,4 +76,4 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ vars.DOCKER_USERNAME }}/house-price-pred-model:latest
-          labels: ${{ secrets.DOCKER_USERNAME }}/house-price-pred-model:latest
+          labels: ${{ vars.DOCKER_USERNAME }}/house-price-pred-model:latest

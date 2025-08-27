@@ -1,0 +1,193 @@
+# .github/workflows/streamlit-ci.yml
+name: Streamlit CI
+
+on:
+  push:
+    paths:
+      - 'streamlit_app/**'
+      - '.github/workflows/streamlit-ci.yml'
+    branches:
+      - main
+      - develop
+  
+  pull_request:
+    paths:
+      - 'streamlit_app/**'
+      - '.github/workflows/streamlit-ci.yml'
+    branches:
+      - main
+      - develop
+  
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        type: choice
+        required: true
+        default: 'development'
+        options:
+          - development
+          - staging
+          - production
+      tag_suffix:
+        description: 'Custom tag suffix (e.g., "hotfix-1")'
+        type: string
+        required: false
+
+env:
+  DOCKER_REGISTRY: docker.io
+  IMAGE_NAME: streamlit
+  PYTHON_VERSION: '3.11.11'
+
+# Prevent multiple builds of the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    name: Build and Push Streamlit Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+
+      - name: Log in to DockerHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ vars.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/develop" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Environment-based tags
+            type=raw,value=${{ steps.env.outputs.environment }}-latest
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            
+            # Branch-based tags
+            type=ref,event=branch,prefix=${{ steps.env.outputs.environment }}-
+            type=ref,event=pr,prefix=pr-
+            
+            # SHA-based tags for traceability
+            type=sha,prefix=${{ steps.env.outputs.environment }}-,format=short
+            
+            # Custom suffix support
+            type=raw,value=${{ steps.env.outputs.environment }}-{{date 'YYYYMMDD'}}-${{ github.event.inputs.tag_suffix }},enable=${{ github.event.inputs.tag_suffix != '' }}
+          flavor: |
+            latest=false
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-streamlit-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-streamlit-
+
+      - name: Build and test image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./streamlit_app
+          file: ./streamlit_app/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ${{ env.IMAGE_NAME }}:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+
+      - name: Test Docker image
+        run: |
+          echo "Testing Streamlit Docker image..."
+          docker run --rm ${{ env.IMAGE_NAME }}:test python --version
+          docker run --rm ${{ env.IMAGE_NAME }}:test streamlit version
+          
+          # Test that the app can at least import without errors
+          docker run --rm ${{ env.IMAGE_NAME }}:test python -c "import streamlit; print('Streamlit imported successfully')"
+
+      - name: Scan for vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_NAME }}:test
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'  # Don't fail the build, just report
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Build and push multi-platform image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v5
+        with:
+          context: ./streamlit_app
+          file: ./streamlit_app/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            PYTHON_VERSION=${{ env.PYTHON_VERSION }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
+            VCS_REF=${{ github.sha }}
+            ENVIRONMENT=${{ steps.env.outputs.environment }}
+
+      - name: Create deployment summary
+        if: github.event_name != 'pull_request'
+        run: |
+          echo "## Streamlit Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Information" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ steps.env.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Registry**: ${{ env.DOCKER_REGISTRY }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: ${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platforms**: linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tags Published" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "Pull the image:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.DOCKER_REGISTRY }}/${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.environment }}-latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

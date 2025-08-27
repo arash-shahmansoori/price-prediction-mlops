@@ -1,0 +1,538 @@
+# .github/workflows/mlops-pipeline.yml
+name: MLOps Pipeline
+
+# This workflow supports multiple run modes for flexibility:
+# - all: Run complete pipeline (data → training → build)
+# - data-processing-only: Just process data and create artifacts
+# - model-training-only: Train using existing data artifacts
+# - build-only: Build Docker image using existing model artifacts
+# - data-and-training: Process data and train, skip Docker build
+# - training-and-build: Train and build using existing data artifacts
+
+on:
+  # Manual trigger with job selection
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: 'Which jobs to run'
+        type: choice
+        required: true
+        default: 'all'
+        options:
+          - all
+          - data-processing-only
+          - model-training-only
+          - build-only
+          - data-and-training
+          - training-and-build
+      skip_mlflow:
+        description: 'Skip MLflow server setup (use for quick tests)'
+        type: boolean
+        required: false
+        default: false
+      model_version_suffix:
+        description: 'Custom suffix for model version'
+        type: string
+        required: false
+      environment:
+        description: 'Target environment'
+        type: choice
+        required: true
+        default: 'development'
+        options:
+          - development
+          - staging
+          - production
+
+  push:
+    branches: [ main ]
+    tags: [ 'v*.*.*' ]
+  pull_request:
+    branches: [ main ]
+
+# Prevent multiple workflow runs on the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.run_mode || 'auto' }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11.11'
+  MLFLOW_VERSION: 'v2.9.2'
+  # Determine run mode (for manual dispatch vs automatic triggers)
+  RUN_MODE: ${{ github.event.inputs.run_mode || 'all' }}
+  SKIP_MLFLOW: ${{ github.event.inputs.skip_mlflow || 'false' }}
+  MODEL_VERSION_SUFFIX: ${{ github.event.inputs.model_version_suffix || '' }}
+  ENVIRONMENT: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production') || 'development' }}
+
+jobs:
+  # Configuration summary for manual runs
+  show-config:
+    name: Show Pipeline Configuration
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+    - name: Display Configuration
+      run: |
+        echo "## Pipeline Configuration" >> $GITHUB_STEP_SUMMARY
+        echo "- **Run Mode**: ${{ env.RUN_MODE }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Skip MLflow**: ${{ env.SKIP_MLFLOW }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Model Version Suffix**: ${{ env.MODEL_VERSION_SUFFIX || 'None' }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Jobs to Run" >> $GITHUB_STEP_SUMMARY
+        case "${{ env.RUN_MODE }}" in
+          "all")
+            echo "- ✓ Data Processing" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Model Training" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "data-processing-only")
+            echo "- ✓ Data Processing" >> $GITHUB_STEP_SUMMARY
+            echo "- ✗ Model Training" >> $GITHUB_STEP_SUMMARY
+            echo "- ✗ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "model-training-only")
+            echo "- ✗ Data Processing (will use artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Model Training" >> $GITHUB_STEP_SUMMARY
+            echo "- ✗ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "build-only")
+            echo "- ✗ Data Processing (will use artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✗ Model Training (will use artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "data-and-training")
+            echo "- ✓ Data Processing" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Model Training" >> $GITHUB_STEP_SUMMARY
+            echo "- ✗ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+          "training-and-build")
+            echo "- ✗ Data Processing (will use artifacts)" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Model Training" >> $GITHUB_STEP_SUMMARY
+            echo "- ✓ Docker Build & Publish" >> $GITHUB_STEP_SUMMARY
+            ;;
+        esac
+
+  data-processing:
+    name: Process Data and Engineer Features
+    runs-on: ubuntu-latest
+    # Run if: all, data-processing-only, or data-and-training
+    if: |
+      github.event_name != 'workflow_dispatch' || 
+      contains(fromJSON('["all", "data-processing-only", "data-and-training"]'), github.event.inputs.run_mode)
+    outputs:
+      data-hash: ${{ steps.hash.outputs.data-hash }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+        pip list
+
+    - name: Process data
+      id: process
+      run: |
+        echo "Starting data processing..."
+        python src/data/run_processing.py \
+          --input data/raw/house_data.csv \
+          --output data/processed/cleaned_house_data.csv
+        
+        # Validate output
+        if [ ! -f data/processed/cleaned_house_data.csv ]; then
+          echo "Error: Cleaned data file not created"
+          exit 1
+        fi
+        echo "Data processing completed successfully"
+
+    - name: Engineer features
+      id: features
+      run: |
+        echo "Starting feature engineering..."
+        python src/features/engineer.py \
+          --input data/processed/cleaned_house_data.csv \
+          --output data/processed/featured_house_data.csv \
+          --preprocessor models/trained/preprocessor.pkl
+        
+        # Validate outputs
+        if [ ! -f data/processed/featured_house_data.csv ]; then
+          echo "Error: Featured data file not created"
+          exit 1
+        fi
+        if [ ! -f models/trained/preprocessor.pkl ]; then
+          echo "Error: Preprocessor file not created"
+          exit 1
+        fi
+        echo "Feature engineering completed successfully"
+
+    - name: Generate data hash
+      id: hash
+      run: |
+        echo "data-hash=$(sha256sum data/processed/featured_house_data.csv | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+    - name: Upload processed data
+      uses: actions/upload-artifact@v4
+      with:
+        name: processed-data
+        path: data/processed/featured_house_data.csv
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: Upload preprocessor
+      uses: actions/upload-artifact@v4
+      with:
+        name: preprocessor
+        path: models/trained/preprocessor.pkl
+        retention-days: 1
+        if-no-files-found: error
+
+  model-training:
+    name: Train Model with MLflow
+    needs: [data-processing]
+    # Run if: all, model-training-only, data-and-training, or training-and-build
+    if: |
+      always() && 
+      (github.event_name != 'workflow_dispatch' || 
+       contains(fromJSON('["all", "model-training-only", "data-and-training", "training-and-build"]'), github.event.inputs.run_mode)) &&
+      (needs.data-processing.result == 'success' || needs.data-processing.result == 'skipped')
+    runs-on: ubuntu-latest
+    outputs:
+      model-version: ${{ steps.model-info.outputs.version }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+        cache-dependency-path: |
+          requirements.txt
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -r requirements.txt
+
+    # MLflow directory needs to be created for volume mount
+    - name: Create MLflow directory
+      run: mkdir -p mlflow
+
+    - name: Download processed data
+      if: needs.data-processing.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: processed-data
+        path: data/processed/
+
+    - name: Download preprocessor
+      if: needs.data-processing.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: preprocessor
+        path: models/trained/
+        
+    - name: Check for existing data (standalone mode)
+      if: env.RUN_MODE == 'model-training-only' || env.RUN_MODE == 'training-and-build'
+      run: |
+        echo "Running in standalone training mode, checking for existing data..."
+        if [ ! -f data/processed/featured_house_data.csv ]; then
+          echo "Error: Featured data file not found. Run data-processing job first."
+          echo "For standalone training, ensure data artifacts exist from a previous run."
+          exit 1
+        fi
+        echo "Found existing data files, proceeding with training..."
+
+    - name: Set up MLflow
+      if: env.SKIP_MLFLOW != 'true'
+      run: |
+        # Pull specific version for consistency
+        docker pull ghcr.io/mlflow/mlflow:${{ env.MLFLOW_VERSION }}
+        
+        # Run MLflow with volume mount for persistence
+        docker run -d \
+          -p 5555:5000 \
+          --name mlflow-server \
+          -v $(pwd)/mlflow:/mlflow \
+          -e MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlflow.db \
+          -e MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts \
+          ghcr.io/mlflow/mlflow:${{ env.MLFLOW_VERSION }} \
+          mlflow server --host 0.0.0.0 --port 5000
+
+    - name: Wait for MLflow to start
+      if: env.SKIP_MLFLOW != 'true'
+      timeout-minutes: 5
+      run: |
+        echo "Waiting for MLflow to start..."
+        max_attempts=30
+        attempt=0
+        
+        while [ $attempt -lt $max_attempts ]; do
+          if docker logs mlflow-server 2>&1 | grep -q "Listening at: http://0.0.0.0:5000"; then
+            echo "MLflow server is ready!"
+            # Additional verification
+            if curl -s -o /dev/null -w "%{http_code}" http://localhost:5555 | grep -q "200"; then
+              echo "MLflow UI is accessible"
+              break
+            fi
+          fi
+          
+          echo "Attempt $((attempt + 1))/$max_attempts: MLflow not ready yet..."
+          sleep 2
+          attempt=$((attempt + 1))
+        done
+        
+        if [ $attempt -eq $max_attempts ]; then
+          echo "MLflow failed to start. Logs:"
+          docker logs mlflow-server
+          exit 1
+        fi
+
+    - name: Train model
+      id: train
+      run: |
+        echo "Starting model training..."
+        echo "Environment: ${{ env.ENVIRONMENT }}"
+        echo "Skip MLflow: ${{ env.SKIP_MLFLOW }}"
+        
+        # Set model version based on git tag or commit
+        if [[ $GITHUB_REF == refs/tags/v* ]]; then
+          MODEL_VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          MODEL_VERSION="${{ env.ENVIRONMENT }}-$(git rev-parse --short HEAD)"
+        fi
+        
+        # Add custom suffix if provided
+        if [[ -n "${{ env.MODEL_VERSION_SUFFIX }}" ]]; then
+          MODEL_VERSION="${MODEL_VERSION}-${{ env.MODEL_VERSION_SUFFIX }}"
+        fi
+        
+        export MODEL_VERSION
+        echo "Model version: $MODEL_VERSION"
+        
+        # Determine MLflow URI
+        if [[ "${{ env.SKIP_MLFLOW }}" == "true" ]]; then
+          echo "Running without MLflow tracking"
+          MLFLOW_URI="file://./mlruns"
+        else
+          MLFLOW_URI="http://localhost:5555"
+        fi
+        
+        python src/models/train_model.py \
+          --config configs/model_config.yaml \
+          --data data/processed/featured_house_data.csv \
+          --models-dir models \
+          --mlflow-tracking-uri $MLFLOW_URI
+        
+        # Validate model output
+        if [ ! -d models/trained ] || [ -z "$(ls -A models/trained)" ]; then
+          echo "Error: No model files created"
+          exit 1
+        fi
+        
+        echo "Model training completed successfully"
+
+    - name: Extract model info
+      id: model-info
+      run: |
+        if [[ $GITHUB_REF == refs/tags/v* ]]; then
+          echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        else
+          echo "version=dev-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Upload trained model
+      uses: actions/upload-artifact@v4
+      with:
+        name: trained-model
+        path: models/
+        retention-days: 1
+        if-no-files-found: error
+
+    - name: Upload MLflow artifacts
+      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+      uses: actions/upload-artifact@v4
+      with:
+        name: mlflow-artifacts
+        path: mlflow/
+        retention-days: 7
+        if-no-files-found: warn
+
+    - name: Clean up MLflow
+      if: always()
+      run: |
+        echo "Stopping MLflow server..."
+        docker stop mlflow-server || true
+        docker rm mlflow-server || true
+        docker image prune -f || true
+
+  build-and-publish:
+    name: Build and Push Docker Image
+    needs: [data-processing, model-training]
+    runs-on: ubuntu-latest
+    # Run if: push to main/tags OR manual dispatch with appropriate run modes
+    if: |
+      always() &&
+      (needs.model-training.result == 'success' || needs.model-training.result == 'skipped') &&
+      (needs.data-processing.result == 'success' || needs.data-processing.result == 'skipped') &&
+      (
+        (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) ||
+        (github.event_name == 'workflow_dispatch' && contains(fromJSON('["all", "build-only", "training-and-build"]'), github.event.inputs.run_mode))
+      )
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Download trained model
+      if: needs.model-training.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: trained-model
+        path: models/
+
+    - name: Download preprocessor  
+      if: needs.data-processing.result == 'success'
+      uses: actions/download-artifact@v4
+      with:
+        name: preprocessor
+        path: models/trained/
+        
+    - name: Check for existing artifacts
+      if: env.RUN_MODE == 'build-only'
+      run: |
+        echo "Running in build-only mode, checking for existing model files..."
+        if [ ! -d models/trained ] || [ -z "$(ls -A models/trained 2>/dev/null)" ]; then
+          echo "Warning: No model files found. You may need to run model training first."
+          echo "For build-only mode, ensure model artifacts exist from a previous run."
+        fi
+
+    - name: Verify artifacts
+      run: |
+        echo "Checking downloaded artifacts..."
+        find models -type f -name "*.pkl" -o -name "*.joblib" | head -10
+        
+        if [ ! -f models/trained/preprocessor.pkl ]; then
+          echo "Error: Preprocessor not found"
+          exit 1
+        fi
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      with:
+        buildkitd-flags: --debug
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ vars.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ vars.DOCKER_USERNAME }}/house-price-pred-model
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=sha,prefix={{branch}}-,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          VCS_REF=${{ github.sha }}
+          VERSION=${{ needs.model-training.outputs.model-version }}
+
+  cleanup:
+    name: Clean Up Artifacts
+    needs: [data-processing, model-training, build-and-publish]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - name: Delete workflow artifacts
+      # Only delete if not in production or if explicitly requested
+      if: env.ENVIRONMENT != 'production' || github.event_name == 'pull_request'
+      uses: geekyeggo/delete-artifact@v4
+      with:
+        name: |
+          processed-data
+          preprocessor
+          trained-model
+        failOnError: false
+
+    - name: Summary
+      if: always()
+      run: |
+        echo "## Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "### Manual Run Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Mode**: ${{ env.RUN_MODE }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Skip MLflow**: ${{ env.SKIP_MLFLOW }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model Suffix**: ${{ env.MODEL_VERSION_SUFFIX || 'None' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "### Pipeline Results" >> $GITHUB_STEP_SUMMARY
+        echo "- **Data Hash**: ${{ needs.data-processing.outputs.data-hash || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Model Version**: ${{ needs.model-training.outputs.model-version || 'N/A' }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        echo "### Job Status" >> $GITHUB_STEP_SUMMARY
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "- **Configuration**: ${{ needs.show-config.result }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        echo "- **Data Processing**: ${{ needs.data-processing.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Model Training**: ${{ needs.model-training.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Docker Build**: ${{ needs.build-and-publish.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Pipeline Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        
+        # Add notes based on run mode
+        if [[ "${{ env.RUN_MODE }}" != "all" ]] && [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ℹ️ **Note**: Partial pipeline run (mode: ${{ env.RUN_MODE }})" >> $GITHUB_STEP_SUMMARY
+        fi
