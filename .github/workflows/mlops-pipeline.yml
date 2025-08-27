@@ -57,7 +57,7 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.11.11'
-  MLFLOW_VERSION: 'v2.9.2'
+  MLFLOW_VERSION: '2.9.2'
   # Determine run mode (for manual dispatch vs automatic triggers)
   RUN_MODE: ${{ github.event.inputs.run_mode || 'all' }}
   SKIP_MLFLOW: ${{ github.event.inputs.skip_mlflow || 'false' }}
@@ -237,10 +237,6 @@ jobs:
         python -m pip install --upgrade pip setuptools wheel
         pip install -r requirements.txt
 
-    # MLflow directory needs to be created for volume mount
-    - name: Create MLflow directory
-      run: mkdir -p mlflow
-
     - name: Download processed data
       if: needs.data-processing.result == 'success'
       uses: actions/download-artifact@v4
@@ -269,35 +265,39 @@ jobs:
     - name: Set up MLflow
       if: env.SKIP_MLFLOW != 'true'
       run: |
-        # Pull specific version for consistency
-        docker pull ghcr.io/mlflow/mlflow:${{ env.MLFLOW_VERSION }}
+        # Install MLflow if not already installed
+        pip show mlflow || pip install mlflow==${{ env.MLFLOW_VERSION }}
         
-        # Run MLflow with volume mount for persistence
-        docker run -d \
-          -p 5555:5000 \
-          --name mlflow-server \
-          -v $(pwd)/mlflow:/mlflow \
-          -e MLFLOW_BACKEND_STORE_URI=sqlite:////mlflow/mlflow.db \
-          -e MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlflow/artifacts \
-          ghcr.io/mlflow/mlflow:${{ env.MLFLOW_VERSION }} \
-          mlflow server --host 0.0.0.0 --port 5000
+        # Create MLflow directories
+        mkdir -p mlflow/artifacts mlruns
+        
+        # Start MLflow server in background
+        mlflow server \
+          --backend-store-uri sqlite:///$(pwd)/mlflow/mlflow.db \
+          --default-artifact-root file://$(pwd)/mlflow/artifacts \
+          --host 0.0.0.0 \
+          --port 5555 \
+          --serve-artifacts &
+        
+        # Save the PID
+        echo $! > mlflow.pid
+        
+        # Give MLflow time to start
+        sleep 5
 
     - name: Wait for MLflow to start
       if: env.SKIP_MLFLOW != 'true'
-      timeout-minutes: 5
+      timeout-minutes: 2
       run: |
         echo "Waiting for MLflow to start..."
         max_attempts=30
         attempt=0
         
         while [ $attempt -lt $max_attempts ]; do
-          if docker logs mlflow-server 2>&1 | grep -q "Listening at: http://0.0.0.0:5000"; then
+          if curl -s -o /dev/null -w "%{http_code}" http://localhost:5555 | grep -q "200"; then
             echo "MLflow server is ready!"
-            # Additional verification
-            if curl -s -o /dev/null -w "%{http_code}" http://localhost:5555 | grep -q "200"; then
-              echo "MLflow UI is accessible"
-              break
-            fi
+            echo "MLflow UI is accessible at http://localhost:5555"
+            break
           fi
           
           echo "Attempt $((attempt + 1))/$max_attempts: MLflow not ready yet..."
@@ -306,8 +306,14 @@ jobs:
         done
         
         if [ $attempt -eq $max_attempts ]; then
-          echo "MLflow failed to start. Logs:"
-          docker logs mlflow-server
+          echo "MLflow failed to start."
+          # Check if process is still running
+          if [ -f mlflow.pid ]; then
+            pid=$(cat mlflow.pid)
+            if ! ps -p $pid > /dev/null; then
+              echo "MLflow process died"
+            fi
+          fi
           exit 1
         fi
 
@@ -333,19 +339,21 @@ jobs:
         export MODEL_VERSION
         echo "Model version: $MODEL_VERSION"
         
-        # Determine MLflow URI
+        # Configure MLflow
         if [[ "${{ env.SKIP_MLFLOW }}" == "true" ]]; then
           echo "Running without MLflow tracking"
-          MLFLOW_URI="file://./mlruns"
+          export MLFLOW_TRACKING_URI="file://$(pwd)/mlruns"
         else
-          MLFLOW_URI="http://localhost:5555"
+          export MLFLOW_TRACKING_URI="http://localhost:5555"
         fi
+        
+        echo "MLflow tracking URI: $MLFLOW_TRACKING_URI"
         
         python src/models/train_model.py \
           --config configs/model_config.yaml \
           --data data/processed/featured_house_data.csv \
           --models-dir models \
-          --mlflow-tracking-uri $MLFLOW_URI
+          --mlflow-tracking-uri $MLFLOW_TRACKING_URI
         
         # Validate model output
         if [ ! -d models/trained ] || [ -z "$(ls -A models/trained)" ]; then
@@ -382,12 +390,17 @@ jobs:
         if-no-files-found: warn
 
     - name: Clean up MLflow
-      if: always()
+      if: always() && env.SKIP_MLFLOW != 'true'
       run: |
         echo "Stopping MLflow server..."
-        docker stop mlflow-server || true
-        docker rm mlflow-server || true
-        docker image prune -f || true
+        if [ -f mlflow.pid ]; then
+          pid=$(cat mlflow.pid)
+          if ps -p $pid > /dev/null 2>&1; then
+            kill $pid || true
+            echo "MLflow server stopped"
+          fi
+          rm -f mlflow.pid
+        fi
 
   build-and-publish:
     name: Build and Push Docker Image
