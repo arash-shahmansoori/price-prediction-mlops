@@ -1,4 +1,3 @@
-# .github/workflows/mlops-pipeline.yml
 name: MLOps Pipeline
 
 # This workflow supports multiple run modes for flexibility:
