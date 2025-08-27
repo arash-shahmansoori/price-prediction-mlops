@@ -1,4 +1,4 @@
-name: MLOps Pipeline
+name: MLOps CI
 
 # This workflow supports multiple run modes for flexibility:
 # - all: Run complete pipeline (data → training → build)
