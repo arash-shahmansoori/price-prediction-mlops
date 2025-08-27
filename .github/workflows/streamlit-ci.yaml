@@ -1,4 +1,3 @@
-# .github/workflows/streamlit-ci.yml
 name: Streamlit CI
 
 on:
