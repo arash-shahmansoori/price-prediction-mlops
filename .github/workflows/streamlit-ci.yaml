@@ -120,8 +120,8 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: ${{ env.IMAGE_NAME }}:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
           build-args: |
             PYTHON_VERSION=${{ env.PYTHON_VERSION }}
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
@@ -161,8 +161,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ vars.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
           build-args: |
             PYTHON_VERSION=${{ env.PYTHON_VERSION }}
             BUILD_DATE=${{ github.event.head_commit.timestamp || github.event.repository.updated_at }}
