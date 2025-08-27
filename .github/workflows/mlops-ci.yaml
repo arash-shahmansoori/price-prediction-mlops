@@ -492,7 +492,6 @@ jobs:
       run: |
         echo "Checking for existing cache images..."
         docker manifest inspect ${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache 2>/dev/null && echo "AMD64 cache found" || echo "AMD64 cache not found (will be created)"
-        docker manifest inspect ${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache-arm64 2>/dev/null && echo "ARM64 cache found" || echo "ARM64 cache not found (will be created)"
 
     # Build for AMD64 first (faster, most common)
     - name: Build and Push Docker Image (AMD64)
@@ -518,35 +517,38 @@ jobs:
         provenance: false
         sbom: false
 
-    # Build ARM64 only for main branch and tags (optional)
-    - name: Set up QEMU for ARM64
-      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm64
+    # ARM64 builds are disabled for faster development
+    # Uncomment the following sections to enable ARM64 builds for production
+    
+    # # Build ARM64 only for main branch and tags (optional)
+    # - name: Set up QEMU for ARM64
+    #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    #   uses: docker/setup-qemu-action@v3
+    #   with:
+    #     platforms: arm64
 
-    - name: Build and Push Docker Image (ARM64)
-      if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-      timeout-minutes: 25
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./Dockerfile
-        platforms: linux/arm64
-        push: true
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: |
-          type=registry,ref=${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache-arm64
-        cache-to: |
-          type=registry,ref=${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache-arm64,mode=max
-        build-args: |
-          BUILD_DATE=${{ github.event.head_commit.timestamp }}
-          VCS_REF=${{ github.sha }}
-          VERSION=${{ needs.model-training.outputs.model-version }}
-          BUILDKIT_INLINE_CACHE=1
-        provenance: false
-        sbom: false
+    # - name: Build and Push Docker Image (ARM64)
+    #   if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    #   timeout-minutes: 25
+    #   uses: docker/build-push-action@v5
+    #   with:
+    #     context: .
+    #     file: ./Dockerfile
+    #     platforms: linux/arm64
+    #     push: true
+    #     tags: ${{ steps.meta.outputs.tags }}
+    #     labels: ${{ steps.meta.outputs.labels }}
+    #     cache-from: |
+    #       type=registry,ref=${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache-arm64
+    #     cache-to: |
+    #       type=registry,ref=${{ vars.DOCKER_USERNAME }}/house-price-pred-model:buildcache-arm64,mode=max
+    #     build-args: |
+    #       BUILD_DATE=${{ github.event.head_commit.timestamp }}
+    #       VCS_REF=${{ github.sha }}
+    #       VERSION=${{ needs.model-training.outputs.model-version }}
+    #       BUILDKIT_INLINE_CACHE=1
+    #     provenance: false
+    #     sbom: false
 
   cleanup:
     name: Clean Up Artifacts
