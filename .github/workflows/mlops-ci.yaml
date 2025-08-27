@@ -54,9 +54,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.run_mode || 'auto' }}
   cancel-in-progress: true
 
-# Global timeout for the entire workflow (2 hours max)
-timeout-minutes: 120
-
 env:
   PYTHON_VERSION: '3.11.11'
   MLFLOW_VERSION: '2.9.2'
@@ -118,6 +115,7 @@ jobs:
   data-processing:
     name: Process Data and Engineer Features
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Run if: all, data-processing-only, or data-and-training
     if: |
       github.event_name != 'workflow_dispatch' || 
@@ -211,13 +209,14 @@ jobs:
   model-training:
     name: Train Model with MLflow
     needs: [data-processing]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Run if: all, model-training-only, data-and-training, or training-and-build
     if: |
       always() && 
       (github.event_name != 'workflow_dispatch' || 
        contains(fromJSON('["all", "model-training-only", "data-and-training", "training-and-build"]'), github.event.inputs.run_mode)) &&
       (needs.data-processing.result == 'success' || needs.data-processing.result == 'skipped')
-    runs-on: ubuntu-latest
     outputs:
       model-version: ${{ steps.model-info.outputs.version }}
     steps:
