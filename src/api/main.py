@@ -46,6 +46,7 @@ async def health_check():
 async def predict(request: HousePredictionRequest):
     return predict_price(request)
 
+
 # Batch prediction endpoint
 @app.post("/batch-predict", response_model=list)
 async def batch_predict_endpoint(requests: list[HousePredictionRequest]):
