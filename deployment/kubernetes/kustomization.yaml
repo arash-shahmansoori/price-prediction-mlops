@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# List of resource files to include
+resources:
+  - model-deploy.yaml
+  - model-svc.yaml
+  - streamlit-deploy.yaml
+  - streamlit-svc.yaml
+
+# Common labels applied to all resources
+commonLabels:
+  app: house-price-predictor
+  environment: production
+
+# Optional: Add a namespace to all resources
+# namespace: house-price-app
+
+# Optional: Add name prefix to all resources
+# namePrefix: prod-
+
+# Optional: Add annotations to all resources
+# commonAnnotations:
+#   managed-by: kustomize

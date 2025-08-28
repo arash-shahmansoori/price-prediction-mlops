@@ -1,0 +1,27 @@
+# Replace <your-docker-registry> with your Docker Hub username or private registry URL
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: streamlit
+  name: streamlit
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: streamlit
+  strategy: {}
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: streamlit
+    spec:
+      containers:
+      - image: arashmsn/streamlit:latest
+        name: streamlit
+        ports:
+        - containerPort: 8501
+        resources: {}
+status: {}
