@@ -4,14 +4,20 @@ metadata:
   creationTimestamp: null
   labels:
     app: model
+    monitoring: enabled
   name: model
 spec:
   ports:
-  - name: "8000"
+  - name: http
     nodePort: 30100
     port: 8000
     protocol: TCP
     targetPort: 8000
+  - name: metrics
+    nodePort: 30101
+    port: 9100
+    protocol: TCP
+    targetPort: 9100
   selector:
     app: model
   type: NodePort

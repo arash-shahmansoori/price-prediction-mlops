@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: house-price-app
+  namespace: default
+  labels:
+    release: prom  # Match the label of your Prometheus instance
+spec:
+  selector:
+    matchLabels:
+      monitoring: enabled
+  namespaceSelector:
+    matchNames:
+      - default
+  endpoints:
+    # Scrape metrics from the main app on port 8000
+    - port: http
+      path: /metrics
+      interval: 15s
+    # Scrape metrics from the dedicated metrics server on port 9100
+    - port: metrics
+      path: /
+      interval: 15s
+      scrapeTimeout: 10s

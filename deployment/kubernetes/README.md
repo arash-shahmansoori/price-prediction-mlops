@@ -14,7 +14,7 @@ This directory contains Kubernetes manifests for deploying the House Price Predi
 
 ## Prerequisites
 
-- Kubernetes cluster (Kind, Minikube, or any other)
+- **Running Kubernetes cluster** (Kind, Minikube, or any other) - See "Setting Up Kubernetes Cluster" section below
 - kubectl CLI installed and configured
 - Docker images built and pushed to registry:
   - `<your-docker-registry>/streamlit:latest`
@@ -46,8 +46,80 @@ Before deploying, you must update the Docker image references in the deployment 
    - Amazon ECR: `123456789.dkr.ecr.region.amazonaws.com`
    - Private Registry: `myregistry.com/project`
 
-## Deployment Instructions
+## Setting Up Kubernetes Cluster
 
+### Option 1: Using Kind (Kubernetes in Docker)
+
+1. **Install Kind** (if not already installed):
+   ```bash
+   # macOS
+   brew install kind
+   
+   # Linux
+   curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.20.0/kind-linux-amd64
+   chmod +x ./kind
+   sudo mv ./kind /usr/local/bin/kind
+   ```
+
+2. **Create a 3-node Kind cluster**:
+   ```bash
+   # Using the provided configuration file
+   kind create cluster --name house-price-cluster --config k8s-code/helper/kind/kind-three-node-cluster.yaml
+   
+   # Or create a simple single-node cluster
+   kind create cluster --name house-price-cluster
+   ```
+
+3. **Verify cluster is running**:
+   ```bash
+   kubectl cluster-info --context kind-house-price-cluster
+   ```
+
+### Option 2: Using Minikube
+
+1. **Start Minikube**:
+   ```bash
+   minikube start
+   ```
+
+2. **Verify cluster is running**:
+   ```bash
+   kubectl cluster-info
+   ```
+
+### Verifying Kubernetes Cluster Status
+
+Before proceeding with deployment, ensure your cluster is properly configured:
+
+1. **Check current context**:
+   ```bash
+   kubectl config current-context
+   ```
+
+2. **Verify cluster connectivity**:
+   ```bash
+   kubectl cluster-info
+   ```
+   
+   You should see output similar to:
+   ```
+   Kubernetes control plane is running at https://127.0.0.1:xxxxx
+   CoreDNS is running at https://127.0.0.1:xxxxx/api/v1/namespaces/kube-system/services/kube-dns:dns/proxy
+   ```
+
+3. **Check cluster nodes**:
+   ```bash
+   kubectl get nodes
+   ```
+   
+   All nodes should show `Ready` status.
+
+4. **If using Kind, list existing clusters**:
+   ```bash
+   kind get clusters
+   ```
+
+## Deployment Instructions
 ### Using Kustomize (Recommended)
 
 Deploy all resources with a single command:
@@ -93,6 +165,7 @@ Once deployed, access the services at:
 - **Model API**: http://localhost:30100
 - **API Health Check**: http://localhost:30100/health
 - **API Documentation**: http://localhost:30100/docs
+- **Cluster Visualizer**: http://localhost:32100/#scale=2
 
 ### Test the endpoints:
 
@@ -111,10 +184,14 @@ curl -X POST http://localhost:30100/predict \
 
 ## Port Mappings
 
-| Service   | Internal Port | NodePort | URL                     |
-|-----------|---------------|----------|-------------------------|
-| Streamlit | 8501          | 30000    | http://localhost:30000  |
-| Model API | 8000          | 30100    | http://localhost:30100  |
+| Service        | Internal Port | NodePort | URL                       |
+|----------------|---------------|----------|---------------------------|
+| Streamlit      | 8501          | 30000    | http://localhost:30000    |
+| Model API      | 8000          | 30100    | http://localhost:30100    |
+| Model Metrics  | 9100          | 30101    | http://localhost:30101    |
+| Prometheus     | 9090          | 30300    | http://localhost:30300    |
+| Grafana        | 3000          | 30200    | http://localhost:30200    |
+| Kube Ops View  | 8080          | 32100    | http://localhost:32100    |
 
 ## Monitoring and Management
 
@@ -154,6 +231,90 @@ kubectl edit deployment streamlit
 # Check rollout status
 kubectl rollout status deployment/streamlit
 ```
+
+## Prometheus Monitoring Setup
+
+### Installing Prometheus Stack
+
+Deploy Prometheus and Grafana for monitoring your application:
+
+```bash
+# Add Prometheus Helm repository
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+# Install Prometheus stack with custom values
+helm upgrade --install prom \
+  -n monitoring \
+  --create-namespace \
+  prometheus-community/kube-prometheus-stack \
+  --set grafana.service.type=NodePort \
+  --set grafana.service.nodePort=30200 \
+  --set prometheus.service.type=NodePort \
+  --set prometheus.service.nodePort=30300
+```
+
+### Configuring Application Monitoring
+
+Deploy the ServiceMonitor to enable Prometheus scraping:
+
+```bash
+# Apply ServiceMonitor configuration
+kubectl apply -f deployment/monitoring/servicemonitor.yaml
+```
+
+### Accessing Monitoring Services
+
+| Service     | NodePort | URL                        | Default Credentials    |
+|-------------|----------|----------------------------|------------------------|
+| Prometheus  | 30300    | http://localhost:30300     | No auth required       |
+| Grafana     | 30200    | http://localhost:30200     | admin / prom-operator  |
+
+### Verifying Metrics Collection
+
+1. **Check application metrics endpoints**:
+   ```bash
+   # FastAPI metrics on port 8000
+   curl http://localhost:30100/metrics
+   
+   # Prometheus client metrics on port 9100
+   curl http://localhost:30101/
+   ```
+
+2. **Query metrics in Prometheus**:
+   - Go to http://localhost:30300
+   - Try queries like:
+     - `http_requests_total`
+     - `rate(http_requests_total[5m])`
+     - `histogram_quantile(0.95, http_request_duration_seconds_bucket)`
+
+### Available Metrics
+
+The FastAPI application exposes metrics through two endpoints:
+
+1. **Port 8000 `/metrics`** - FastAPI-specific metrics via `prometheus-fastapi-instrumentator`:
+   - `http_requests_total` - Total HTTP requests by method, status, and handler
+   - `http_request_duration_seconds` - Request latency histogram
+   - `http_request_size_bytes` - Size of incoming requests
+   - `http_response_size_bytes` - Size of outgoing responses
+   - `http_requests_in_progress` - Currently active requests
+
+2. **Port 9100 `/`** - Raw Prometheus client metrics:
+   - Python runtime metrics (GC, memory usage)
+   - Process metrics (CPU, file descriptors)
+   - Custom application metrics (if added)
+
+### Monitoring Troubleshooting
+
+If you encounter issues with metrics not appearing in Prometheus, refer to the comprehensive troubleshooting guide:
+
+📚 **[Prometheus Monitoring Troubleshooting Guide](../monitoring/TROUBLESHOOTING.md)**
+
+This guide covers:
+- Common ServiceMonitor configuration issues
+- Service label and selector mismatches
+- Debugging steps for metric collection
+- Essential fixes and verification commands
 
 ## Troubleshooting
 
@@ -232,16 +393,146 @@ EOF
 
 ## Clean Up
 
-Remove all deployed resources:
+### Quick Cleanup (Remove Everything)
+
+To completely clean up all resources and the Kind cluster:
 
 ```bash
-# Using Kustomize
+# 1. Delete application resources (model & streamlit)
 kubectl delete -k deployment/kubernetes
 
-# Or manually
-kubectl delete deployment streamlit model
-kubectl delete service streamlit model
+# 2. Delete ServiceMonitor
+kubectl delete -f deployment/monitoring/servicemonitor.yaml
+
+# 3. Uninstall Prometheus monitoring stack
+helm uninstall prom -n monitoring
+
+# 4. Delete monitoring namespace
+kubectl delete namespace monitoring
+
+# 5. Delete Kubernetes Ops View
+kubectl delete -f deployment/kubernetes/kube-ops-view.yaml
+
+# 6. Delete Dashboard admin account
+kubectl delete -f deployment/kubernetes/dashboard-admin.yaml
+
+# 7. Delete namespaces (this removes all resources within them)
+kubectl delete namespace kubernetes-dashboard
+kubectl delete namespace monitoring
+
+# 8. Delete the entire Kind cluster
+kind delete cluster
 ```
+
+### Selective Cleanup
+
+If you want to keep the cluster but remove specific components:
+
+#### Remove only the application:
+```bash
+kubectl delete -k deployment/kubernetes
+```
+
+#### Remove only monitoring:
+```bash
+helm uninstall prom -n monitoring
+kubectl delete namespace monitoring
+kubectl delete -f deployment/monitoring/servicemonitor.yaml
+```
+
+#### Remove only visualization tools:
+```bash
+# Kube-ops-view
+kubectl delete -f deployment/kubernetes/kube-ops-view.yaml
+
+# Kubernetes Dashboard
+kubectl delete namespace kubernetes-dashboard
+```
+
+### Verify Cleanup
+
+Check remaining resources:
+```bash
+# Check all resources
+kubectl get all --all-namespaces
+
+# Check specific namespaces
+kubectl get namespaces
+
+# Check if Kind cluster still exists
+kind get clusters
+```
+
+### Complete Reset Script
+
+Save this as `cleanup.sh` for easy cleanup:
+
+```bash
+#!/bin/bash
+echo "Cleaning up Kubernetes resources..."
+
+# Delete application
+kubectl delete -k deployment/kubernetes 2>/dev/null
+
+# Delete monitoring
+helm uninstall prom -n monitoring 2>/dev/null
+kubectl delete -f deployment/monitoring/servicemonitor.yaml 2>/dev/null
+
+# Delete visualization tools
+kubectl delete -f deployment/kubernetes/kube-ops-view.yaml 2>/dev/null
+kubectl delete -f deployment/kubernetes/dashboard-admin.yaml 2>/dev/null
+
+# Delete namespaces
+kubectl delete namespace kubernetes-dashboard 2>/dev/null
+kubectl delete namespace monitoring 2>/dev/null
+
+# Wait for namespaces to be fully deleted
+echo "Waiting for namespaces to be deleted..."
+kubectl wait --for=delete namespace/monitoring --timeout=60s 2>/dev/null
+kubectl wait --for=delete namespace/kubernetes-dashboard --timeout=60s 2>/dev/null
+
+# Delete Kind cluster
+echo "Deleting Kind cluster..."
+kind delete cluster
+
+echo "Cleanup complete!"
+```
+
+Make it executable: `chmod +x cleanup.sh`
+
+## Cluster Visualization Tools
+
+### Kubernetes Ops View
+
+For a real-time visual representation of your cluster, we've included Kubernetes Ops View:
+
+**Access**: http://localhost:32100/#scale=2
+
+**Features**:
+- Real-time cluster visualization showing nodes and pods
+- Color-coded pod states:
+  - 🟩 Green: Running pods
+  - 🟨 Yellow: Pending/Creating pods
+  - 🟥 Red: Failed/Error pods
+  - ⬜ Gray: Terminating pods
+- Interactive zoom and pan
+- Hover for pod details
+- Auto-refresh every few seconds
+
+**Installation** (already included):
+```bash
+kubectl apply -f deployment/kubernetes/kube-ops-view.yaml
+```
+
+**URL Parameters**:
+- `#scale=2` - Zoom level (0.5 to 5)
+- `?namespace=default` - Filter by namespace
+
+This provides a bird's-eye view of your cluster, making it easy to:
+- Monitor pod distribution across nodes
+- Spot failing or pending pods quickly
+- Understand resource utilization visually
+- Track deployments and scaling operations
 
 ## Kind Cluster Specific Configuration
 
@@ -259,6 +550,9 @@ nodes:
     protocol: TCP
   - containerPort: 30100
     hostPort: 30100
+    protocol: TCP
+  - containerPort: 32100
+    hostPort: 32100
     protocol: TCP
 ```
 
